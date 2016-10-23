@@ -1,6 +1,6 @@
 ﻿/*
 TShock, a server mod for Terraria
-Copyright (C) 2011-2015 Nyx Studios (fka. The TShock Team)
+Copyright (C) 2011-2016 Nyx Studios (fka. The TShock Team)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -67,7 +67,7 @@ namespace TShockAPI.DB
 						Permissions.immunetokick, Permissions.tpothers));
 
 				AddDefaultGroup("trustedadmin", "admin",
-					string.Join(",", Permissions.maintenance, "tshock.cfg.*", "tshock.world.*", Permissions.butcher, Permissions.item,
+					string.Join(",", Permissions.maintenance, "tshock.cfg.*", "tshock.world.*", Permissions.butcher, Permissions.item, Permissions.give,
 						Permissions.heal, Permissions.immunetoban, Permissions.usebanneditem));
 
 				AddDefaultGroup("vip", "default", string.Join(",", Permissions.reservedslot));

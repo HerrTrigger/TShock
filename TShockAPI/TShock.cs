@@ -1,6 +1,6 @@
 /*
 TShock, a server mod for Terraria
-Copyright (C) 2011-2015 Nyx Studios (fka. The TShock Team)
+Copyright (C) 2011-2016 Nyx Studios (fka. The TShock Team)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -45,7 +45,7 @@ namespace TShockAPI
 	/// This is the TShock main class. TShock is a plugin on the TerrariaServerAPI, so it extends the base TerrariaPlugin.
 	/// TShock also complies with the API versioning system, and defines its required API version here.
 	/// </summary>
-	[ApiVersion(1, 23)]
+	[ApiVersion(1, 25)]
 	public class TShock : TerrariaPlugin
 	{
 		/// <summary>VersionNum - The version number the TerrariaAPI will return back to the API. We just use the Assembly info.</summary>
@@ -71,6 +71,9 @@ namespace TShockAPI
 		/// Set by the command line, disables the '/restart' command.
 		/// </summary>
 		internal static bool NoRestart;
+
+		/// <summary>Will be set to true once Utils.StopServer() is called.</summary>
+		public static bool ShuttingDown;
 
 		/// <summary>Players - Contains all TSPlayer objects for accessing TSPlayers currently on the server</summary>
 		public static TSPlayer[] Players = new TSPlayer[Main.maxPlayers];
@@ -292,7 +295,7 @@ namespace TShockAPI
 				RestManager = new RestManager(RestApi);
 				RestManager.RegisterRestfulCommands();
 
-				var geoippath = Path.Combine(SavePath, "GeoIP.dat");
+				var geoippath = "GeoIP.dat";
 				if (Config.EnableGeoIP && File.Exists(geoippath))
 					Geo = new GeoIPCountry(geoippath);
 
@@ -317,6 +320,7 @@ namespace TShockAPI
 				ServerApi.Hooks.WorldChristmasCheck.Register(this, OnXmasCheck);
 				ServerApi.Hooks.WorldHalloweenCheck.Register(this, OnHalloweenCheck);
 				ServerApi.Hooks.NetNameCollision.Register(this, NetHooks_NameCollision);
+				ServerApi.Hooks.ItemForceIntoChest.Register(this, OnItemForceIntoChest);
 				Hooks.PlayerHooks.PlayerPreLogin += OnPlayerPreLogin;
 				Hooks.PlayerHooks.PlayerPostLogin += OnPlayerLogin;
 				Hooks.AccountHooks.AccountDelete += OnAccountDelete;
@@ -384,6 +388,7 @@ namespace TShockAPI
 				ServerApi.Hooks.WorldChristmasCheck.Deregister(this, OnXmasCheck);
 				ServerApi.Hooks.WorldHalloweenCheck.Deregister(this, OnHalloweenCheck);
 				ServerApi.Hooks.NetNameCollision.Deregister(this, NetHooks_NameCollision);
+				ServerApi.Hooks.ItemForceIntoChest.Deregister(this, OnItemForceIntoChest);
 				TShockAPI.Hooks.PlayerHooks.PlayerPostLogin -= OnPlayerLogin;
 
 				if (File.Exists(Path.Combine(SavePath, "tshock.pid")))
@@ -407,8 +412,8 @@ namespace TShockAPI
 				KnownIps = JsonConvert.DeserializeObject<List<String>>(args.Player.User.KnownIps);
 			}
 
-			bool found = KnownIps.Any(s => s.Equals(args.Player.IP));
-			if (!found)
+			bool last = KnownIps.Last() == args.Player.IP;
+			if (!last)
 			{
 				if (KnownIps.Count == 100)
 				{
@@ -467,6 +472,44 @@ namespace TShockAPI
 						Netplay.Clients[player.Index].PendingTermination = true;
 						args.Handled = true;
 					}
+				}
+			}
+		}
+
+		/// <summary>OnItemForceIntoChest - Internal hook fired when a player quick stacks items into a chest.</summary>
+		/// <param name="args">The <see cref="ForceItemIntoChestEventArgs"/> object.</param>
+		private void OnItemForceIntoChest(ForceItemIntoChestEventArgs args)
+		{
+			if (args.Handled)
+			{
+				return;
+			}
+
+			if (args.Player == null)
+			{
+				args.Handled = true;
+				return;
+			}
+
+			TSPlayer tsplr = Players[args.Player.whoAmI];
+			if (tsplr == null)
+			{
+				args.Handled = true;
+				return;
+			}
+
+			if (args.Chest != null)
+			{
+				if (Config.RegionProtectChests && !Regions.CanBuild((int)args.WorldPosition.X, (int)args.WorldPosition.Y, tsplr))
+				{
+					args.Handled = true;
+					return;
+				}
+
+				if (CheckRangePermission(tsplr, args.Chest.x, args.Chest.y))
+				{
+					args.Handled = true;
+					return;
 				}
 			}
 		}
@@ -749,36 +792,43 @@ namespace TShockAPI
 		private void OnPostInit(EventArgs args)
 		{
 			SetConsoleTitle(false);
-			if (!File.Exists(Path.Combine(SavePath, "auth.lck")) && !File.Exists(Path.Combine(SavePath, "authcode.txt")))
+
+			// Disable the auth system if "auth.lck" is present or a superadmin exists
+			if (File.Exists(Path.Combine(SavePath, "auth.lck")) || Users.GetUsers().Exists(u => u.Group == new SuperAdminGroup().Name))
+			{
+				AuthToken = 0;
+
+				if (File.Exists(Path.Combine(SavePath, "authcode.txt")))
+				{
+					Log.ConsoleInfo("A superadmin account has been detected in the user database, but authcode.txt is still present.");
+					Log.ConsoleInfo("TShock will now disable the auth system and remove authcode.txt as it is no longer needed.");
+					File.Delete(Path.Combine(SavePath, "authcode.txt"));
+				}
+
+				if (!File.Exists(Path.Combine(SavePath, "auth.lck")))
+				{
+					// This avoids unnecessary database work, which can get ridiculously high on old servers as all users need to be fetched
+					File.Create(Path.Combine(SavePath, "auth.lck"));
+				}
+			}
+			else if (!File.Exists(Path.Combine(SavePath, "authcode.txt")))
 			{
 				var r = new Random((int)DateTime.Now.ToBinary());
 				AuthToken = r.Next(100000, 10000000);
 				Console.ForegroundColor = ConsoleColor.Yellow;
 				Console.WriteLine("TShock Notice: To become SuperAdmin, join the game and type {0}auth {1}", Commands.Specifier, AuthToken);
-				Console.WriteLine("This token will display until disabled by verification. ({0}auth-verify)", Commands.Specifier);
-				Console.ForegroundColor = ConsoleColor.Gray;
-				FileTools.CreateFile(Path.Combine(SavePath, "authcode.txt"));
-				using (var tw = new StreamWriter(Path.Combine(SavePath, "authcode.txt")))
-				{
-					tw.WriteLine(AuthToken);
-				}
-			}
-			else if (File.Exists(Path.Combine(SavePath, "authcode.txt")))
-			{
-				using (var tr = new StreamReader(Path.Combine(SavePath, "authcode.txt")))
-				{
-					AuthToken = Convert.ToInt32(tr.ReadLine());
-				}
-				Console.ForegroundColor = ConsoleColor.Yellow;
-				Console.WriteLine(
-					"TShock Notice: authcode.txt is still present, and the AuthToken located in that file will be used.");
-				Console.WriteLine("To become superadmin, join the game and type {0}auth {1}", Commands.Specifier, AuthToken);
-				Console.WriteLine("This token will display until disabled by verification. ({0}auth-verify)", Commands.Specifier);
-				Console.ForegroundColor = ConsoleColor.Gray;
+				Console.WriteLine("This token will display until disabled by verification. ({0}auth)", Commands.Specifier);
+				Console.ResetColor();
+				File.WriteAllText(Path.Combine(SavePath, "authcode.txt"), AuthToken.ToString());
 			}
 			else
 			{
-				AuthToken = 0;
+				AuthToken = Convert.ToInt32(File.ReadAllText(Path.Combine(SavePath, "authcode.txt")));
+				Console.ForegroundColor = ConsoleColor.Yellow;
+				Console.WriteLine("TShock Notice: authcode.txt is still present, and the AuthToken located in that file will be used.");
+				Console.WriteLine("To become superadmin, join the game and type {0}auth {1}", Commands.Specifier, AuthToken);
+				Console.WriteLine("This token will display until disabled by verification. ({0}auth)", Commands.Specifier);
+				Console.ResetColor();
 			}
 
 			Regions.Reload();
@@ -980,6 +1030,15 @@ namespace TShockAPI
 						player.PaintThreshold = 0;
 					}
 
+					if (player.HealOtherThreshold >= TShock.Config.HealOtherThreshold)
+					{
+						player.Disable("Reached HealOtherPlayer threshold", flags);
+					}
+					if (player.HealOtherThreshold > 0)
+					{
+						player.HealOtherThreshold = 0;
+					}
+
 					if (player.RespawnTimer > 0 && --player.RespawnTimer == 0 && player.Difficulty != 2)
 					{
 						player.Spawn();
@@ -1069,7 +1128,7 @@ namespace TShockAPI
 
 						if (CheckIgnores(player))
 						{
-                            player.Disable(flags: flags);
+							player.Disable(flags: flags);
 						}
 						else if (Itembans.ItemIsBanned(player.TPlayer.inventory[player.TPlayer.selectedItem].name, player))
 						{
@@ -1102,10 +1161,10 @@ namespace TShockAPI
 		/// <param name="empty">empty - True/false if the server is empty; determines if we should use Utils.ActivePlayers() for player count or 0.</param>
 		private void SetConsoleTitle(bool empty)
 		{
-			Console.Title = string.Format("{0}{1}/{2} @ {3}:{4} (TShock for Terraria v{5})",
+			Console.Title = string.Format("{0}{1}/{2} on {3} @ {4}:{5} (TShock for Terraria v{6})",
 					!string.IsNullOrWhiteSpace(Config.ServerName) ? Config.ServerName + " - " : "",
 					empty ? 0 : Utils.ActivePlayers(),
-					Config.MaxSlots, Netplay.ServerIP.ToString(), Netplay.ListenPort, Version);
+					Config.MaxSlots, Main.worldName, Netplay.ServerIP.ToString(), Netplay.ListenPort, Version);
 		}
 
 		/// <summary>OnHardUpdate - Fired when a hardmode tile update event happens.</summary>
@@ -1153,6 +1212,13 @@ namespace TShockAPI
 		/// <param name="args">args - The ConnectEventArgs object.</param>
 		private void OnConnect(ConnectEventArgs args)
 		{
+			if (ShuttingDown)
+			{
+				NetMessage.SendData((int)PacketTypes.Disconnect, args.Who, -1, "Server is shutting down...");
+				args.Handled = true;
+				return;
+			}
+
 			var player = new TSPlayer(args.Who);
 
 			if (Utils.ActivePlayers() + 1 > Config.MaxSlots + Config.ReservedSlots)
@@ -1337,11 +1403,17 @@ namespace TShockAPI
 			{
 				try
 				{
-					args.Handled = Commands.HandleCommand(tsplr, args.Text);
+					args.Handled = true;
+					if (!Commands.HandleCommand(tsplr, args.Text))
+					{
+						// This is required in case anyone makes HandleCommand return false again
+						tsplr.SendErrorMessage("Unable to parse command. Please contact an administrator for assistance.");
+						Log.ConsoleError("Unable to parse command '{0}' from player {1}.", args.Text, tsplr.Name);
+					}
 				}
 				catch (Exception ex)
 				{
-					Log.ConsoleError("An exeption occurred executing a command.");
+					Log.ConsoleError("An exception occurred executing a command.");
 					Log.Error(ex.ToString());
 				}
 			}
@@ -1397,6 +1469,12 @@ namespace TShockAPI
 		{
 			if (args.Handled)
 				return;
+
+			if (string.IsNullOrWhiteSpace(args.Command))
+			{
+				args.Handled = true;
+				return;
+			}
 
 			// Damn you ThreadStatic and Redigit
 			if (Main.rand == null)
@@ -1700,8 +1778,7 @@ namespace TShockAPI
 				return true;
 			}
 
-			if (!player.HasPermission(Permissions.editregion) && !Regions.CanBuild(tileX, tileY, player) &&
-				Regions.InArea(tileX, tileY))
+			if (!Regions.CanBuild(tileX, tileY, player))
 			{
 				if (((DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond) - player.RPm) > 2000)
 				{
@@ -1768,8 +1845,7 @@ namespace TShockAPI
 				return true;
 			}
 
-			if (!player.HasPermission(Permissions.editregion) && !Regions.CanBuild(tileX, tileY, player) &&
-				Regions.InArea(tileX, tileY))
+			if (!Regions.CanBuild(tileX, tileY, player))
 			{
 				if (((DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond) - player.RPm) > 2000)
 				{
